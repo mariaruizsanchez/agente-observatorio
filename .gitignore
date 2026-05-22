@@ -1,0 +1,16 @@
+# NUNCA subir el archivo de credenciales reales
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/
+.idea/
