@@ -1,70 +1,85 @@
 """
-Configuración centralizada del agente.
+Configuracion centralizada del agente.
 
-TODA la configuración del proveedor de IA y de la base de datos vive aquí
-y se lee desde variables de entorno (archivo .env). Esto es lo que permite
-cambiar de GitHub Models a OpenAI o Anthropic SIN TOCAR el resto del código:
-solo editas el .env.
+La configuracion (proveedor de IA y base de datos) se obtiene de dos posibles
+fuentes, segun donde se ejecute la aplicacion:
+
+  - En LOCAL (el ordenador): de las variables de entorno del archivo .env.
+  - En LA NUBE (Streamlit Community Cloud): de los "secrets" de Streamlit,
+    que se configuran en el panel de la aplicacion desplegada.
+
+El codigo intenta primero los secrets de Streamlit; si no existen, recurre
+al archivo .env. De este modo, el mismo codigo funciona en ambos entornos
+sin necesidad de modificarlo.
 """
 
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # carga las variables del archivo .env
+load_dotenv()  # carga las variables del archivo .env (entorno local)
+
+
+def _leer(clave, por_defecto=""):
+    """
+    Devuelve el valor de una clave de configuracion.
+
+    Orden de busqueda:
+      1. Secrets de Streamlit (cuando la app corre en Streamlit Cloud).
+      2. Variables de entorno / archivo .env (cuando corre en local).
+      3. Valor por defecto.
+    """
+    try:
+        import streamlit as st
+        if clave in st.secrets:
+            return st.secrets[clave]
+    except Exception:
+        pass
+    return os.getenv(clave, por_defecto)
 
 
 # ---------------------------------------------------------------------------
 # PROVEEDOR DE IA
 # ---------------------------------------------------------------------------
-# GitHub Models, OpenAI y Azure OpenAI son todos compatibles con el SDK de
-# OpenAI: solo cambian la URL base, la clave y el nombre del modelo.
-#
-# Para usar cada proveedor, copia .env.example a .env y rellena segun:
-#
-#   GitHub Models  (gratis para estudiantes, ideal para DESARROLLO)
-#     AI_BASE_URL=https://models.inference.ai.azure.com
-#     AI_API_KEY=<tu token de GitHub con permiso de "models">
-#     AI_MODEL=gpt-4o-mini
-#
-#   OpenAI directo (de pago, centimos/mes, ideal para la PRESENTACION)
-#     AI_BASE_URL=https://api.openai.com/v1
-#     AI_API_KEY=<tu clave de OpenAI>
-#     AI_MODEL=gpt-4o-mini
-#
-#   Azure OpenAI (si algun dia se desbloquea tu acceso)
-#     AI_BASE_URL=https://<tu-recurso>.openai.azure.com/openai/deployments/<deployment>
-#     AI_API_KEY=<tu clave de Azure>
-#     AI_MODEL=<nombre de tu deployment>
+# GitHub Models, OpenAI y Azure OpenAI son compatibles con el SDK de OpenAI:
+# solo cambian la URL base, la clave y el nombre del modelo.
 # ---------------------------------------------------------------------------
 
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://models.inference.ai.azure.com")
-AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+AI_BASE_URL = _leer("AI_BASE_URL", "https://models.inference.ai.azure.com")
+AI_API_KEY = _leer("AI_API_KEY", "")
+AI_MODEL = _leer("AI_MODEL", "gpt-4o-mini")
 
 
 # ---------------------------------------------------------------------------
-# BASE DE DATOS  (Azure SQL Database / SQL Server)
+# BASE DE DATOS  (Azure SQL Database)
 # ---------------------------------------------------------------------------
-# La cadena de conexion ODBC completa. Ejemplo para Azure SQL:
+# La conexion se realiza con la libreria pymssql, que necesita los datos por
+# separado (servidor, usuario, contrase\u00f1a y base de datos).
 #
-#   DB_CONNECTION_STRING=Driver={ODBC Driver 18 for SQL Server};
-#       Server=tcp:<tu-servidor>.database.windows.net,1433;
-#       Database=<tu-bbdd>;Uid=<usuario>;Pwd=<contraseña>;
-#       Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;
+# En el archivo .env (local) o en los secrets (nube), se definen asi:
+#   DB_SERVER=srv-observatorio-mrs.database.windows.net
+#   DB_USER=adminsql
+#   DB_PASSWORD=tu_contrase\u00f1a
+#   DB_NAME=db-observatorio
 # ---------------------------------------------------------------------------
 
-DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING", "")
+DB_SERVER = _leer("DB_SERVER", "")
+DB_USER = _leer("DB_USER", "")
+DB_PASSWORD = _leer("DB_PASSWORD", "")
+DB_NAME = _leer("DB_NAME", "")
 
 
 def validar():
-    """Comprueba que la configuración mínima está presente y avisa con claridad."""
+    """Comprueba que la configuracion minima esta presente y avisa con claridad."""
     faltan = []
     if not AI_API_KEY:
         faltan.append("AI_API_KEY")
-    if not DB_CONNECTION_STRING:
-        faltan.append("DB_CONNECTION_STRING")
+    for nombre, valor in [("DB_SERVER", DB_SERVER), ("DB_USER", DB_USER),
+                          ("DB_PASSWORD", DB_PASSWORD), ("DB_NAME", DB_NAME)]:
+        if not valor:
+            faltan.append(nombre)
     if faltan:
         raise SystemExit(
-            "Falta configuración en el archivo .env: " + ", ".join(faltan) +
-            "\nCopia .env.example a .env y rellena los valores."
+            "Falta configuracion: " + ", ".join(faltan) +
+            "\nEn local: revisa el archivo .env. "
+            "En Streamlit Cloud: revisa los secrets de la aplicacion."
         )
