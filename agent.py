@@ -80,6 +80,20 @@ GROUP BY / ORDER BY, para que los resultados queden desglosados por sexo.
 No mezcles ni promedies hombres y mujeres en un mismo valor. Este desglose es
 el objetivo central del Observatorio, asi que aplicalo aunque la pregunta no
 mencione el sexo explicitamente.
+
+REGLA DEL AÑO (comportamiento por defecto, similar a un filtro de año):
+Casi todas las tablas tienen la columna Año.
+- Si la pregunta menciona un año concreto (por ejemplo "en 2022"), filtra por
+  ese año.
+- Si la pregunta pide explicita o implicitamente varios años (con palabras
+  como "evolucion", "por año", "historico", "tendencia", "cada año", "desde
+  ... hasta ..."), devuelve todos los años, ordenados por año.
+- Si la pregunta NO menciona ningun año ni indica varios años, devuelve
+  UNICAMENTE el dato del ultimo año disponible. Para ello filtra con
+  WHERE Año = (SELECT MAX(Año) FROM <la misma tabla>), e INCLUYE SIEMPRE la
+  columna Año en el SELECT (para que se sepa de que año son los datos). Este
+  es el comportamiento por defecto, equivalente a un filtro de año en el
+  ultimo periodo disponible.
 """
 
 
@@ -130,7 +144,30 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
             {"role": "system", "content": (
                 "Redactas respuestas claras y breves en español a partir de "
                 "resultados de consultas SQL. No inventes datos. Presenta "
-                "todos los datos del resultado, no solo una parte."
+                "todos los datos del resultado, no solo una parte.\n\n"
+                "PERSPECTIVA DE GÉNERO (obligatorio siempre que el resultado "
+                "incluya datos de Hombre y de Mujer):\n"
+                "1. Presenta la respuesta SEPARADA en dos bloques claramente "
+                "diferenciados: primero los datos de Hombres y despues los "
+                "datos de Mujeres. No los mezcles en una sola lista.\n"
+                "2. Despues de los dos bloques, añade SIEMPRE un apartado con "
+                "la diferencia entre hombres y mujeres (la brecha de genero). "
+                "Calcula esa diferencia y elige la forma de expresarla mas "
+                "adecuada al tipo de dato: para importes (salarios, rentas, "
+                "pensiones) usa la diferencia absoluta y, ademas, el "
+                "porcentaje; para tasas y porcentajes usa la diferencia en "
+                "puntos porcentuales; para recuentos (numero de nacimientos, "
+                "de personas) usa la diferencia absoluta. Indica siempre que "
+                "grupo tiene el valor mas alto.\n"
+                "3. Si hay varios años o categorias, aplica este desglose y "
+                "esta diferencia para cada uno de ellos.\n\n"
+                "AVISO DEL AÑO: si la consulta SQL filtra por un unico año "
+                "mediante MAX(Año) (es decir, se ha devuelto el ultimo año "
+                "disponible por defecto), indica al final esta frase: 'Los "
+                "datos son del año mas reciente disponible (AAAA).', "
+                "sustituyendo AAAA por el año concreto de los datos del "
+                "resultado. Añade ademas que se puede pedir la evolucion "
+                "completa de todos los años."
             )},
             {"role": "user", "content": (
                 f"Pregunta del usuario: {pregunta}\n\n"
