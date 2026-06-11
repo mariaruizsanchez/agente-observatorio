@@ -1,17 +1,12 @@
 """
-Carga inicial de datos: Excel  ->  Azure SQL.
+Carga inicial y sincronización de datos: Excel  ->  Azure SQL.
 
 Lee el archivo Observatorio_SocioLaboral_Datos.xlsx, crea una tabla en la base
 de datos por cada hoja de datos, y vuelca todas las filas.
 
-Se ejecuta cada vez que se modifican los datos del Excel, para que la base de
-datos en la nube refleje esos cambios. Cada tabla se borra y se recrea, de modo
-que tambien se aplican los cambios de estructura (columnas renombradas, etc.).
-
-La conexion se realiza con la libreria pymssql, igual que en database.py.
-
-Uso:
-    python cargar_datos.py
+Además, detecta si hay tablas en la base de datos que ya no existen como 
+pestañas en el Excel (tablas fantasma) y las elimina automáticamente para
+mantener la sincronización exacta.
 """
 
 import os
@@ -19,14 +14,14 @@ import pandas as pd
 import pymssql
 import config
 
-# Ruta del Excel: se busca primero junto al codigo (carpeta del proyecto) y,
-# si no, en la carpeta superior. Es la misma logica que en database.py.
+# Ruta del Excel: se busca primero junto al código (carpeta del proyecto) y,
+# si no, en la carpeta superior.
 _AQUI = os.path.dirname(os.path.abspath(__file__))
 _RUTA_LOCAL = os.path.join(_AQUI, "Observatorio_SocioLaboral_Datos.xlsx")
 _RUTA_SUPERIOR = os.path.join(_AQUI, "..", "Observatorio_SocioLaboral_Datos.xlsx")
 RUTA_EXCEL = _RUTA_LOCAL if os.path.exists(_RUTA_LOCAL) else _RUTA_SUPERIOR
 
-# Hojas que NO son tablas de datos (documentacion). No se cargan.
+# Hojas que NO son tablas de datos (documentación). No se cargan.
 HOJAS_IGNORADAS = {"_Instrucciones", "_Diccionario"}
 
 # Correspondencia entre tipos de pandas y tipos de SQL Server.
@@ -50,7 +45,7 @@ def nombre_columna(col):
 
 
 def conectar():
-    """Abre una conexion con la base de datos Azure SQL (igual que database.py)."""
+    """Abre una conexión con la base de datos Azure SQL."""
     return pymssql.connect(
         server=config.DB_SERVER,
         user=config.DB_USER,
@@ -64,7 +59,7 @@ def crear_y_cargar(conn, nombre_hoja, df):
     """Crea la tabla correspondiente a una hoja y carga sus filas."""
     cursor = conn.cursor()
 
-    # 1. Si la tabla ya existia de una carga anterior, se elimina y se rehace.
+    # 1. Si la tabla ya existía de una carga anterior, se elimina y se rehace.
     cursor.execute(f"IF OBJECT_ID('{nombre_hoja}', 'U') IS NOT NULL "
                    f"DROP TABLE [{nombre_hoja}]")
 
@@ -75,7 +70,6 @@ def crear_y_cargar(conn, nombre_hoja, df):
     cursor.execute(f"CREATE TABLE [{nombre_hoja}] ({columnas_sql})")
 
     # 3. INSERT de todas las filas.
-    #    pymssql usa %s como marcador de posicion para los valores.
     marcadores = ", ".join("%s" for _ in df.columns)
     cols = ", ".join(nombre_columna(c) for c in df.columns)
     insert = f"INSERT INTO [{nombre_hoja}] ({cols}) VALUES ({marcadores})"
@@ -89,6 +83,30 @@ def crear_y_cargar(conn, nombre_hoja, df):
     print(f"  OK  {nombre_hoja}: {len(filas)} filas cargadas")
 
 
+def limpiar_tablas_fantasma(conn, hojas_excel):
+    """Detecta y elimina tablas en Azure SQL que ya no están en el Excel."""
+    cursor = conn.cursor()
+    
+    # Obtenemos las hojas válidas que se van a cargar (ignorando documentación)
+    hojas_validas = {nombre for nombre in hojas_excel.keys() if nombre not in HOJAS_IGNORADAS}
+    
+    # Consultamos las tablas que existen actualmente en Azure SQL
+    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
+    tablas_existentes = {fila[0] for fila in cursor.fetchall()}
+    
+    # Encontramos las tablas fantasma (están en BD pero no en Excel)
+    tablas_fantasma = tablas_existentes - hojas_validas
+    
+    # Eliminamos las tablas huérfanas
+    for tabla in tablas_fantasma:
+        # Medida de seguridad extra para no borrar tablas de sistema internas de SQL
+        if not tabla.startswith("sys"): 
+            print(f"  --  Eliminando tabla fantasma: {tabla}")
+            cursor.execute(f"DROP TABLE [{tabla}]")
+            
+    conn.commit()
+
+
 def main():
     config.validar()
 
@@ -97,13 +115,17 @@ def main():
 
     print("Conectando a Azure SQL...\n")
     with conectar() as conn:
+        # Paso NUEVO: Limpiar la base de datos antes de cargar nada
+        limpiar_tablas_fantasma(conn, hojas)
+
+        # Paso HABITUAL: Cargar los datos nuevos
         for nombre, df in hojas.items():
             if nombre in HOJAS_IGNORADAS:
-                print(f"  --  {nombre}: hoja de documentacion, se omite")
+                print(f"  --  {nombre}: hoja de documentación, se omite")
                 continue
             crear_y_cargar(conn, nombre, df)
 
-    print("\nCarga completada. La base de datos refleja los datos del Excel.")
+    print("\nCarga completada. La base de datos es ahora un reflejo exacto del Excel.")
 
 
 if __name__ == "__main__":
