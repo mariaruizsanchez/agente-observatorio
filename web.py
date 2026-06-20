@@ -1,10 +1,10 @@
 """
 Interfaz web del agente del Observatorio Sociolaboral.
 
-Es una capa de presentacion: toda la logica vive en agent.py y database.py,
+Es una capa de presentación: toda la lógica vive en agent.py y database.py,
 que NO se modifican. Esta web simplemente los usa.
 
-El diseno sigue una paleta sobria (morados, grises, blanco y negro), acorde
+El diseño sigue una paleta sobria (morados, grises, blanco y negro), acorde
 con el informe de Power BI del Observatorio, y un estilo minimalista.
 
 Para ejecutarla:
@@ -19,7 +19,7 @@ import database
 import agent
 
 
-# --- Configuracion de la pagina --------------------------------------------
+# --- Configuración de la página --------------------------------------------
 st.set_page_config(
     page_title="Observatorio Sociolaboral - Euskadi",
     layout="centered",
@@ -31,15 +31,15 @@ ESTILO = """
 <style>
 html, body, [class*="css"] { color: #1A1A1A; }
 
-/* Oculta el menu, el pie y la barra superior de Streamlit */
+/* Oculta el menú, el pie y la barra superior de Streamlit */
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
 
-/* Titulo principal */
+/* Título principal */
 h1 { color: #3D3260 !important; font-weight: 700 !important; }
 
-/* Subtitulos y encabezados de la barra lateral */
+/* Subtítulos y encabezados de la barra lateral */
 h2, h3 { color: #5B4B8A !important; }
 
 /* Barra lateral con fondo gris muy claro */
@@ -68,7 +68,7 @@ div[data-testid="stChatMessageAvatarUser"] {
     display: none;
 }
 
-/* Boton: morado principal */
+/* Botón: morado principal */
 div.stButton > button {
     background-color: #5B4B8A;
     color: #FFFFFF;
@@ -120,7 +120,7 @@ def cargar_contexto():
 
 # --- Cabecera ---------------------------------------------------------------
 st.title("Observatorio Sociolaboral de Euskadi")
-st.caption("Agente conversacional con perspectiva de genero \u00b7 "
+st.caption("Agente conversacional con perspectiva de género · "
            "Pregunta en lenguaje natural sobre los datos")
 
 try:
@@ -130,7 +130,7 @@ except Exception as e:
     st.stop()
 
 
-# --- Historial de la conversacion -------------------------------------------
+# --- Historial de la conversación -------------------------------------------
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 if "historial" not in st.session_state:
@@ -149,7 +149,7 @@ for msg in st.session_state.mensajes:
     if msg["rol"] == "user":
         mostrar_pregunta(msg["texto"])
     else:
-        # El agente si lleva avatar de robot.
+        # El agente sí lleva avatar de robot.
         with st.chat_message("assistant", avatar="\U0001F916"):
             st.markdown(msg["texto"])
             if msg.get("sql"):
@@ -198,13 +198,4 @@ if pregunta:
 # --- Barra lateral con ayuda ------------------------------------------------
 with st.sidebar:
     st.header("Sobre el agente")
-    st.write("Este asistente traduce preguntas en lenguaje natural a "
-             "consultas SQL sobre la base de datos del Observatorio.")
-    st.subheader("Ejemplos de preguntas")
-    st.write("- Evolucion de la tasa de paro por anio en Bizkaia")
-    st.write("- Salario medio por anio")
-    st.write("- Numero de nacimientos en Gipuzkoa")
-    if st.button("Reiniciar conversacion"):
-        st.session_state.mensajes = []
-        st.session_state.historial = []
-        st.rerun()
+    st.
