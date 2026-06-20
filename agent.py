@@ -3,18 +3,18 @@ El agente Text-to-SQL.
 
 Flujo de una pregunta:
   1. Se le pasa al modelo la pregunta + el esquema de la BBDD + el historial
-     de la conversación.
-  2. El modelo devuelve una consulta SQL (o pide una aclaración).
+     de la conversacion.
+  2. El modelo devuelve una consulta SQL (o pide una aclaracion).
   3. La consulta se ejecuta contra Azure SQL.
   4. El modelo redacta una respuesta en lenguaje natural con el resultado.
 
-El agente recuerda los mensajes anteriores: así, si el usuario responde
-"Bizkaia" a una pregunta de aclaración, el modelo entiende que completa la
+El agente recuerda los mensajes anteriores: asi, si el usuario responde
+"Bizkaia" a una pregunta de aclaracion, el modelo entiende que completa la
 pregunta anterior.
 
 El cliente de IA usa el SDK de OpenAI, que es compatible con GitHub Models,
 OpenAI y Azure OpenAI. El proveedor concreto se decide en config.py / .env,
-así que este archivo NO cambia al cambiar de proveedor.
+asi que este archivo NO cambia al cambiar de proveedor.
 """
 
 from openai import OpenAI
@@ -22,8 +22,8 @@ import config
 import database
 
 
-# Cliente de IA: la URL base y la clave vienen de la configuración.
-# Cambiar de GitHub Models a OpenAI/Azure se hace editando el .env, no aquí.
+# Cliente de IA: la URL base y la clave vienen de la configuracion.
+# Cambiar de GitHub Models a OpenAI/Azure se hace editando el .env, no aqui.
 cliente = OpenAI(base_url=config.AI_BASE_URL, api_key=config.AI_API_KEY)
 
 
@@ -136,7 +136,7 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
     if len(filas) > LIMITE:
         aviso = (f"\n\nNOTA: la consulta devolvio {len(filas)} filas pero solo "
                  f"se muestran las primeras {LIMITE}. Avisa al usuario de que "
-                 "el resultado es parcial y que conviene concretar la pregunta.")
+                 f"el resultado es parcial y que conviene concretar la pregunta.")
 
     respuesta = cliente.chat.completions.create(
         model=config.AI_MODEL,
@@ -151,14 +151,15 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                 "diferenciados: primero los datos de Hombres y despues los "
                 "datos de Mujeres. No los mezcles en una sola lista.\n"
                 "2. Despues de los dos bloques, añade SIEMPRE un apartado con "
-                "la diferencia entre hombres y mujeres (la brecha de genero). "
-                "Calcula esa diferencia y elige la forma de expresarla mas "
-                "adecuada al tipo de dato: para importes (salarios, rentas, "
-                "pensiones) usa la diferencia absoluta y, ademas, el "
-                "porcentaje; para tasas y porcentajes usa la diferencia en "
-                "puntos porcentuales; para recuentos (numero de nacimientos, "
-                "de personas) usa la diferencia absoluta. Indica siempre que "
-                "grupo tiene el valor mas alto.\n"
+                "la brecha de genero. Para cualquier calculo de brecha porcentual, "
+                "debes usar ESTRICTAMENTE la formula: (valor_hombres - valor_mujeres) / valor_hombres * 100, "
+                "redondeada a un decimal. Debes enunciarla EXACTAMENTE con esta estructura: "
+                "«la brecha es del X %; las mujeres [verbo adecuado al contexto, ej. perciben/tienen/registran] un X % menos que los hombres». "
+                "REGLA ESTRICTA: Bajo ninguna circunstancia utilices la base femenina para el calculo ni uses "
+                "la formula o estructura 'los hombres ganan/tienen un Y % mas'. "
+                "Ademas, adapta los detalles adicionales segun el tipo de dato: para importes (salarios, rentas) "
+                "añade tambien la diferencia absoluta; para tasas y porcentajes expresa la diferencia en puntos porcentuales; "
+                "para recuentos usa la diferencia absoluta.\n"
                 "3. Si hay varios años o categorias, aplica este desglose y "
                 "esta diferencia para cada uno de ellos.\n\n"
                 "AVISO DEL AÑO: si la consulta SQL filtra por un unico año "
