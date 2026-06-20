@@ -198,4 +198,13 @@ if pregunta:
 # --- Barra lateral con ayuda ------------------------------------------------
 with st.sidebar:
     st.header("Sobre el agente")
-    st.
+    st.write("Este asistente traduce preguntas en lenguaje natural a "
+             "consultas SQL sobre la base de datos del Observatorio.")
+    st.subheader("Ejemplos de preguntas")
+    st.write("- Evolución de la tasa de paro por año en Bizkaia")
+    st.write("- Salario medio por año")
+    st.write("- Número de nacimientos en Gipuzkoa")
+    if st.button("Reiniciar conversación"):
+        st.session_state.mensajes = []
+        st.session_state.historial = []
+        st.rerun()
