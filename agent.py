@@ -91,7 +91,7 @@ Casi todas las tablas tienen la columna Año.
 - Si la pregunta NO menciona ningun año ni indica varios años, devuelve
   UNICAMENTE el dato del ultimo año disponible. Para ello filtra con
   WHERE Año = (SELECT MAX(Año) FROM <la misma tabla>), e INCLUYE SIEMPRE la
-  columna Año en el SELECT (para que se sepa de que año son los datos). Este
+  columna Año in el SELECT (para que se sepa de que año son los datos). Este
   es el comportamiento por defecto, equivalente a un filtro de año en el
   ultimo periodo disponible.
 """
@@ -138,6 +138,73 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                  f"se muestran las primeras {LIMITE}. Avisa al usuario de que "
                  f"el resultado es parcial y que conviene concretar la pregunta.")
 
+    # =========================================================================
+    # NUEVA LÓGICA DE CÁLCULO SEGURO EN PYTHON (EVITA ALUCINACIONES MATEMÁTICAS)
+    # =========================================================================
+    bloque_calculos_python = ""
+    try:
+        # Normalizamos cabeceras a minúsculas para un emparejamiento seguro
+        cabeceras_min = [c.lower() for c in cabeceras]
+        
+        if "sexo" in cabeceras_min:
+            idx_sexo = cabeceras_min.index("sexo")
+            
+            # Buscamos la columna numérica dinámica (aquella que no sea metadato)
+            idx_valor = None
+            for i, col in enumerate(cabeceras_min):
+                if col not in ["año", "sexo", "territorio", "id"]:
+                    idx_valor = i
+                    break
+            
+            if idx_valor is not None:
+                # Agrupamos los datos por dimensiones (Año, Territorio, etc.) para calcular la brecha de cada grupo por separado
+                grupos = {}
+                for fila in filas:
+                    # Creamos una tupla identificadora excluyendo las columnas dinámicas (Sexo y el Valor numérico)
+                    clave = tuple(str(fila[i]) for i, col in enumerate(cabeceras_min) if i != idx_sexo and i != idx_valor)
+                    if clave not in grupos:
+                        grupos[clave] = {}
+                    
+                    sexo_valor = str(fila[idx_sexo]).strip().lower()
+                    try:
+                        grupos[clave][sexo_valor] = float(fila[idx_valor])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Ejecutamos las operaciones matemáticas aritméticas reales en la CPU
+                lineas_calculadas = []
+                for clave, sexos in grupos.items():
+                    if "hombre" in sexos and "mujer" in sexos:
+                        val_h = sexos["hombre"]
+                        val_m = sexos["mujer"]
+                        
+                        if val_h > 0:
+                            dif_absoluta = round(val_h - val_m, 2)
+                            brecha_porcentual = round(((val_h - val_m) / val_h) * 100, 1)
+                            
+                            # Si hay agrupaciones por más variables (ej: múltiples años), lo indicamos contextualmente
+                            info_grupo = f"Para el grupo {list(clave)}: " if clave and any(clave) else ""
+                            lineas_calculadas.append(
+                                f"- {info_grupo}Diferencia absoluta exacta: {dif_absoluta}. "
+                                f"Brecha porcentual exacta: {brecha_porcentual}%."
+                            )
+                
+                if lineas_calculadas:
+                    bloque_calculos_python = "\n".join(lineas_calculadas)
+    except Exception:
+        # Mecanismo de seguridad pasiva: si hay un error imprevisto analizando los datos,
+        # la aplicación no se bloquea y deja que el flujo original continúe.
+        pass
+
+    # Adjuntamos las métricas exactas calculadas por Python para que el LLM solo las transcriba
+    instruccion_calculos = ""
+    if bloque_calculos_python:
+        instruccion_calculos = (
+            f"\nDATOS MATEMÁTICOS CALCULADOS POR EL SISTEMA (USA ESTOS, NO CALCULES TÚ NADA):\n"
+            f"{bloque_calculos_python}\n"
+        )
+    # =========================================================================
+
     respuesta = cliente.chat.completions.create(
         model=config.AI_MODEL,
         messages=[
@@ -151,14 +218,16 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                 "diferenciados: primero los datos de Hombres y despues los "
                 "datos de Mujeres. No los mezcles en una sola lista.\n"
                 "2. Despues de los dos bloques, añade SIEMPRE un apartado con "
-                "la brecha de genero. Para cualquier calculo de brecha porcentual, "
-                "debes usar ESTRICTAMENTE la formula: (valor_hombres - valor_mujeres) / valor_hombres * 100, "
-                "redondeada a un decimal. Debes enunciarla EXACTAMENTE con esta estructura: "
+                "la brecha de genero.\n"
+                "REGLA DE ORO MÁXIMA: Usa exclusivamente los datos numéricos de brechas "
+                "y diferencias absolutas proporcionados en la sección 'DATOS MATEMÁTICOS CALCULADOS POR EL SISTEMA'. "
+                "No intentes restar ni dividir tú los valores de las filas por tu cuenta, limítate a copiar las cifras del sistema.\n"
+                "Debes enunciar la brecha porcentual EXACTAMENTE con esta estructura: "
                 "«la brecha es del X %; las mujeres [verbo adecuado al contexto, ej. perciben/tienen/registran] un X % menos que los hombres». "
                 "REGLA ESTRICTA: Bajo ninguna circunstancia utilices la base femenina para el calculo ni uses "
                 "la formula o estructura 'los hombres ganan/tienen un Y % mas'. "
                 "Ademas, adapta los detalles adicionales segun el tipo de dato: para importes (salarios, rentas) "
-                "añade tambien la diferencia absoluta; para tasas y porcentajes expresa la diferencia en puntos porcentuales; "
+                "añade tambien la diferencia absoluta exacta que te proporciona el sistema; para tasas y porcentajes expresa la diferencia en puntos porcentuales; "
                 "para recuentos usa la diferencia absoluta.\n"
                 "3. Si hay varios años o categorias, aplica este desglose y "
                 "esta diferencia para cada uno de ellos.\n\n"
@@ -174,6 +243,7 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                 f"Pregunta del usuario: {pregunta}\n\n"
                 f"Consulta ejecutada: {sql}\n\n"
                 f"Resultado ({len(filas)} filas):\n{tabla_texto}{aviso}\n\n"
+                f"{instruccion_calculos}\n"
                 "Redacta la respuesta para el usuario."
             )},
         ],
