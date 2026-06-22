@@ -83,6 +83,14 @@ def obtener_diccionario():
 
     Si el Excel no esta disponible, devuelve cadena vacia y el agente sigue
     funcionando solo con el esquema.
+
+    FIX (bug 7): NO se incluyen aqui los valores posibles de la columna
+    Territorio. La unica fuente de verdad de los territorios es la consulta en
+    vivo a la BBDD (obtener_territorios), que refleja los datos reales de cada
+    tabla. De este modo el diccionario estatico ya no puede afirmar un
+    territorio que la tabla no tiene (p. ej. 'C.A. de Euskadi' en Trabajo_Tasas);
+    esa contradiccion era la que hacia que el modelo filtrara por un territorio
+    inexistente y la consulta devolviera resultados vacios.
     """
     if not os.path.exists(RUTA_EXCEL):
         return ""
@@ -90,6 +98,12 @@ def obtener_diccionario():
     df = pd.read_excel(RUTA_EXCEL, sheet_name="_Diccionario")
     lineas = []
     for _, fila in df.iterrows():
+        # Saltamos las filas que describen la columna Territorio: los
+        # territorios reales se aportan, ya filtrados por tabla, desde
+        # obtener_territorios().
+        if str(fila.get("Columna", "")).strip().lower() == "territorio":
+            continue
+
         partes = [f"{fila['Tabla']}.{fila['Columna']}"]
         if pd.notna(fila.get("Descripcion")):
             partes.append(f"descripcion: {fila['Descripcion']}")
@@ -108,7 +122,8 @@ def obtener_territorios():
       usa para resolver automaticamente las tablas de un solo territorio.
 
     Se consulta directamente la base de datos, asi que refleja siempre los
-    datos reales.
+    datos reales. Esta es la fuente de verdad UNICA de los territorios (ver la
+    nota en obtener_diccionario).
     """
     consulta_tablas = """
         SELECT TABLE_NAME FROM INFORMATION_SCHEMA.COLUMNS

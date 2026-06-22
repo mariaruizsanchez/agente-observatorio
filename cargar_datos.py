@@ -10,6 +10,7 @@ mantener la sincronización exacta.
 """
 
 import os
+import unicodedata
 import pandas as pd
 import pymssql
 import config
@@ -42,6 +43,59 @@ def tipo_sql(dtype):
 def nombre_columna(col):
     """Encierra el nombre de columna en corchetes (admite acentos y espacios)."""
     return "[" + str(col).replace("]", "") + "]"
+
+
+def _norm(s):
+    """Normaliza un nombre de columna (sin acentos, minusculas) para buscarlo."""
+    s = str(s).strip().lower()
+    return "".join(c for c in unicodedata.normalize("NFKD", s)
+                   if not unicodedata.combining(c))
+
+
+def transformar_jovenes(df):
+    """
+    FIX (bug 3): replica en la carga a SQL el filtro de edad que el dashboard
+    aplica en Power Query, para que el agente y el informe partan del MISMO dato.
+
+    La hoja de jovenes del Excel guarda todas las cohortes de nacimiento. El
+    dashboard calcula Edad = Año - Año_Nacimiento y se queda con la franja 15-29.
+    Aqui se hace lo mismo y, ademas, se agrega la poblacion por
+    Territorio/Año/Sexo, de modo que la tabla en Azure SQL queda ya filtrada y
+    sumada (una sola fila por grupo). Asi "poblacion joven en 2024" devuelve
+    ~331 mil, igual que el dashboard, y desaparece el volcado de cohortes una a
+    una que producia la consulta.
+
+    La deteccion es por columnas: si la hoja tiene una columna de "Año de
+    nacimiento", se le aplica esta transformacion; cualquier otra hoja se carga
+    sin tocar. (No afecta al dashboard, que lee el Excel directamente por su
+    propia ruta de Power Query.)
+
+    Nota: si en el futuro quisieras conservar el detalle por edad en el agente,
+    sustituye el groupby final por mantener la columna Edad y deja que la regla
+    de agregacion del prompt haga el SUM en cada consulta.
+    """
+    cols = {_norm(c): c for c in df.columns}
+    col_nacimiento = next((orig for n, orig in cols.items()
+                           if "nacimiento" in n), None)
+    if col_nacimiento is None:
+        return df  # no es la tabla de jovenes: se carga tal cual
+
+    col_anio = cols.get("ano")
+    col_poblacion = next((orig for n, orig in cols.items()
+                          if "poblacion" in n), None)
+    col_sexo = cols.get("sexo")
+    col_territorio = cols.get("territorio")
+    if not col_anio or not col_poblacion:
+        # Estructura inesperada: no transformamos para no romper la carga.
+        return df
+
+    d = df.copy()
+    d["__edad"] = d[col_anio] - d[col_nacimiento]
+    d = d[(d["__edad"] >= 15) & (d["__edad"] <= 29)]
+
+    claves = [c for c in (col_territorio, col_anio, col_sexo) if c]
+    d = d.groupby(claves, as_index=False)[col_poblacion].sum()
+    return d
 
 
 def conectar():
@@ -123,6 +177,9 @@ def main():
             if nombre in HOJAS_IGNORADAS:
                 print(f"  --  {nombre}: hoja de documentación, se omite")
                 continue
+            # FIX (bug 3): aplica el filtro 15-29 a la tabla de jovenes; el
+            # resto de hojas pasan intactas.
+            df = transformar_jovenes(df)
             crear_y_cargar(conn, nombre, df)
 
     print("\nCarga completada. La base de datos es ahora un reflejo exacto del Excel.")

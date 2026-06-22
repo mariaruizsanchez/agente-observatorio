@@ -17,6 +17,8 @@ OpenAI y Azure OpenAI. El proveedor concreto se decide en config.py / .env,
 asi que este archivo NO cambia al cambiar de proveedor.
 """
 
+import re
+
 from openai import OpenAI
 import config
 import database
@@ -25,6 +27,26 @@ import database
 # Cliente de IA: la URL base y la clave vienen de la configuracion.
 # Cambiar de GitHub Models a OpenAI/Azure se hace editando el .env, no aqui.
 cliente = OpenAI(base_url=config.AI_BASE_URL, api_key=config.AI_API_KEY)
+
+
+# =============================================================================
+# CONFIGURACION DE LA BRECHA (ajustable sin tocar la logica)
+# =============================================================================
+# FIX (bug 5): tablas donde la columna Sexo describe AL SUJETO y NO representa
+# una brecha de genero comparable (p. ej. el sexo de los recien nacidos). En
+# esas tablas no se calcula brecha. La comparacion es por SUBCADENA, asi que
+# "Demografia_Nacimientos" coincide tanto si la tabla en SQL se llama
+# Demografia_Nacimientos como tbl_Demografia_Nacimientos.
+TABLAS_SIN_BRECHA = ("Demografia_Nacimientos",)
+
+# FIX (bug 2): pistas para clasificar el tipo de indicador por el nombre de la
+# columna de valor, y decidir como se expresa la brecha (pp / % / recuento).
+_PISTAS_TASA = ("tasa", "porcentaje", "ratio", "%")
+_PISTAS_IMPORTE = ("salario", "renta", "importe", "ingreso", "euro", "€", "ganancia")
+
+# Palabras que indican que el usuario pide la evolucion (varios años).
+_PALABRAS_EVOLUCION = ("evolu", "por año", "historic", "histórico", "tendencia",
+                       "cada año", "anual", "desde", "hasta", "serie")
 
 
 def _prompt_sistema(esquema, diccionario, territorios):
@@ -91,9 +113,22 @@ Casi todas las tablas tienen la columna Año.
 - Si la pregunta NO menciona ningun año ni indica varios años, devuelve
   UNICAMENTE el dato del ultimo año disponible. Para ello filtra con
   WHERE Año = (SELECT MAX(Año) FROM <la misma tabla>), e INCLUYE SIEMPRE la
-  columna Año in el SELECT (para que se sepa de que año son los datos). Este
+  columna Año en el SELECT (para que se sepa de que año son los datos). Este
   es el comportamiento por defecto, equivalente a un filtro de año en el
   ultimo periodo disponible.
+- ESTA REGLA SE APLICA TAMBIEN A LAS PREGUNTAS DE BRECHA, DIFERENCIA O
+  COMPARACION ENTRE SEXOS. "Cual es la brecha salarial?" NO menciona año, asi
+  que debe devolver SOLO el ultimo año disponible (con WHERE Año = (SELECT
+  MAX(Año) ...)), NUNCA un promedio de varios años. Incluye SIEMPRE la columna
+  Año en el SELECT y en el GROUP BY, para que la brecha se calcule sobre un
+  año concreto y no sobre una media multianual.
+
+REGLA DE AGREGACION:
+Si una tabla tiene VARIAS filas para una misma combinacion de Año, Territorio y
+Sexo (por ejemplo varias cohortes de edad, tramos o categorias) y la pregunta
+pide un total o un dato global, AGREGA con SUM(...) y agrupa con
+GROUP BY Año, Territorio, Sexo. No devuelvas las filas de detalle una a una sin
+agregar cuando lo que se pide es un total.
 """
 
 
@@ -123,8 +158,144 @@ def _pedir_sql(historial):
     return _limpiar_sql(texto)
 
 
+# =============================================================================
+# CALCULO DE LA BRECHA (deterministico, en Python)
+# =============================================================================
+def _tabla_de_sql(sql):
+    """Extrae el nombre de la tabla principal de la consulta (clausula FROM)."""
+    m = re.search(r"\bFROM\s+\[?([A-Za-z0-9_]+)\]?", sql, re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _tipo_indicador(nombre_columna, valores):
+    """
+    FIX (bug 2): clasifica el indicador para expresar bien la brecha.
+      - 'tasa'     -> diferencia en puntos porcentuales (pp)
+      - 'importe'  -> % relativo (base hombres) + diferencia absoluta en €
+      - 'recuento' -> diferencia absoluta
+    Primero por el nombre de la columna; como respaldo, por la magnitud (las
+    tasas se almacenan como fracciones, 0-1).
+    """
+    n = (nombre_columna or "").lower()
+    if any(p in n for p in _PISTAS_TASA):
+        return "tasa"
+    if any(p in n for p in _PISTAS_IMPORTE):
+        return "importe"
+    try:
+        nums = [abs(float(v)) for v in valores if v is not None]
+        if nums and all(x <= 1.5 for x in nums):
+            return "tasa"
+    except (ValueError, TypeError):
+        pass
+    return "recuento"
+
+
+def _frase_brecha(val_h, val_m, tipo):
+    """
+    FIX (bug 2, 4): devuelve la frase de brecha ya redactada, con la unidad
+    correcta segun el tipo y con el SENTIDO (mas/menos) calculado segun quien
+    sea mayor. Asi se evita el texto roto del tipo "las mujeres registran X
+    menos" cuando en realidad tienen mas.
+    """
+    if tipo == "tasa":
+        # Las tasas pueden venir como fraccion (0,162) o como % (16,2).
+        escala = 100 if max(abs(val_h), abs(val_m)) <= 1.5 else 1
+        pp = round(abs(val_h - val_m) * escala, 1)
+        sentido = "menor" if val_m <= val_h else "mayor"
+        return (f"la brecha es de {pp} puntos porcentuales; la tasa de las "
+                f"mujeres es {pp} pp {sentido} que la de los hombres.")
+
+    if tipo == "importe":
+        dif = round(abs(val_h - val_m), 2)
+        base = val_h if val_h else 1
+        pct = round(abs(val_h - val_m) / base * 100, 1)
+        sentido = "menos" if val_m <= val_h else "mas"
+        return (f"la brecha es del {pct} %; las mujeres perciben un {pct} % "
+                f"{sentido} que los hombres (diferencia absoluta de {dif} €).")
+
+    # recuento
+    dif = round(abs(val_h - val_m))
+    sentido = "menos" if val_m <= val_h else "mas"
+    return (f"la diferencia es de {dif}; las mujeres registran {dif} {sentido} "
+            f"que los hombres.")
+
+
+def _calcular_brechas(sql, cabeceras, cabeceras_min, filas):
+    """
+    Construye el bloque de brechas (una linea por grupo: año, territorio...).
+    Devuelve "" si no procede (tabla no comparable, sin sexo, o sin columna
+    numerica).
+    """
+    # FIX (bug 5): no calcular brecha en indicadores no comparables.
+    tabla = _tabla_de_sql(sql)
+    if any(t.lower() in tabla.lower() for t in TABLAS_SIN_BRECHA):
+        return ""
+    if "sexo" not in cabeceras_min:
+        return ""
+
+    idx_sexo = cabeceras_min.index("sexo")
+
+    # Elegimos como columna de valor la PRIMERA realmente numerica (evita
+    # confundir una columna de texto como "Indicador" con el valor).
+    idx_valor = None
+    for i, col in enumerate(cabeceras_min):
+        if col in ("año", "sexo", "territorio", "id"):
+            continue
+        try:
+            float(next(f[i] for f in filas if f[i] is not None))
+            idx_valor = i
+            break
+        except (StopIteration, ValueError, TypeError):
+            continue
+    if idx_valor is None:
+        return ""
+
+    nombre_valor = cabeceras[idx_valor]
+
+    # Agrupamos por las dimensiones (todo lo que no sea Sexo ni el valor) para
+    # calcular la brecha de cada grupo por separado (cada año, cada territorio).
+    grupos = {}
+    for fila in filas:
+        clave = tuple(str(fila[i]) for i in range(len(cabeceras_min))
+                      if i not in (idx_sexo, idx_valor))
+        sexo_valor = str(fila[idx_sexo]).strip().lower()
+        try:
+            grupos.setdefault(clave, {})[sexo_valor] = float(fila[idx_valor])
+        except (ValueError, TypeError):
+            pass
+
+    lineas = []
+    for clave, sexos in grupos.items():
+        if "hombre" not in sexos or "mujer" not in sexos:
+            continue
+        tipo = _tipo_indicador(nombre_valor, (sexos["hombre"], sexos["mujer"]))
+        contexto = f"Para el grupo {list(clave)}: " if clave and any(clave) else ""
+        lineas.append("- " + contexto + _frase_brecha(sexos["hombre"],
+                                                       sexos["mujer"], tipo))
+    return "\n".join(lineas)
+
+
 def _redactar_respuesta(pregunta, sql, cabeceras, filas):
     """Segunda llamada al modelo: redacta la respuesta en lenguaje natural."""
+    cabeceras_min = [c.lower() for c in cabeceras]
+
+    # -- FIX (bug 1 y 6): red de seguridad del "año por defecto" --------------
+    # Si la pregunta no menciona un año ni pide la evolucion, pero el resultado
+    # trae varios años, nos quedamos SOLO con el ultimo. Asi la brecha y el
+    # desglose se calculan sobre el ultimo año aunque la SQL hubiera devuelto la
+    # serie completa o un promedio multianual (corrige el caso "brecha salarial"
+    # que daba 18,9 % en vez de 12,81 %).
+    pregunta_l = pregunta.lower()
+    pide_anio = bool(re.search(r"\b(19|20)\d{2}\b", pregunta_l))
+    pide_evolucion = any(p in pregunta_l for p in _PALABRAS_EVOLUCION)
+    if "año" in cabeceras_min and not pide_anio and not pide_evolucion:
+        ia = cabeceras_min.index("año")
+        try:
+            anio_max = max(int(f[ia]) for f in filas if f[ia] is not None)
+            filas = [f for f in filas if f[ia] is not None and int(f[ia]) == anio_max]
+        except (ValueError, TypeError):
+            pass
+
     # Enviamos hasta 500 filas al modelo. Es suficiente para tablas de
     # evolucion por año/territorio sin disparar el consumo de tokens.
     LIMITE = 500
@@ -138,112 +309,73 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                  f"se muestran las primeras {LIMITE}. Avisa al usuario de que "
                  f"el resultado es parcial y que conviene concretar la pregunta.")
 
-    # =========================================================================
-    # NUEVA LÓGICA DE CÁLCULO SEGURO EN PYTHON (EVITA ALUCINACIONES MATEMÁTICAS)
-    # =========================================================================
+    # -- FIX (bug 4 y 8): nota de año calculada en Python ---------------------
+    # En vez de pedir al modelo que sustituya "(AAAA)", calculamos aqui los años
+    # distintos del resultado: si hay uno, le damos el texto exacto con el año;
+    # si hay varios, le decimos que NO ponga la coletilla (que se colaba en las
+    # consultas de evolucion).
+    instruccion_anio = ""
+    if "año" in cabeceras_min:
+        ia = cabeceras_min.index("año")
+        anios = sorted({str(f[ia]) for f in filas if f[ia] is not None})
+        if len(anios) == 1:
+            instruccion_anio = (
+                f"\nNOTA DE AÑO (incluyela tal cual al final, sin cambiar nada): "
+                f"'Los datos son del año mas reciente disponible ({anios[0]}). "
+                f"Se puede pedir la evolucion completa de todos los años.'\n")
+        else:
+            instruccion_anio = (
+                "\nNOTA DE AÑO: el resultado incluye varios años; NO añadas "
+                "ninguna coletilla sobre 'año mas reciente disponible'.\n")
+
+    # -- FIX (bug 2, 4, 5, 10): brecha calculada y redactada en Python --------
+    # La brecha (con su unidad y su signo) se calcula aqui de forma exacta y se
+    # pasa al modelo ya redactada, para que solo la transcriba.
     bloque_calculos_python = ""
     try:
-        # Normalizamos cabeceras a minúsculas para un emparejamiento seguro
-        cabeceras_min = [c.lower() for c in cabeceras]
-        
-        if "sexo" in cabeceras_min:
-            idx_sexo = cabeceras_min.index("sexo")
-            
-            # Buscamos la columna numérica dinámica (aquella que no sea metadato)
-            idx_valor = None
-            for i, col in enumerate(cabeceras_min):
-                if col not in ["año", "sexo", "territorio", "id"]:
-                    idx_valor = i
-                    break
-            
-            if idx_valor is not None:
-                # Agrupamos los datos por dimensiones (Año, Territorio, etc.) para calcular la brecha de cada grupo por separado
-                grupos = {}
-                for fila in filas:
-                    # Creamos una tupla identificadora excluyendo las columnas dinámicas (Sexo y el Valor numérico)
-                    clave = tuple(str(fila[i]) for i, col in enumerate(cabeceras_min) if i != idx_sexo and i != idx_valor)
-                    if clave not in grupos:
-                        grupos[clave] = {}
-                    
-                    sexo_valor = str(fila[idx_sexo]).strip().lower()
-                    try:
-                        grupos[clave][sexo_valor] = float(fila[idx_valor])
-                    except (ValueError, TypeError):
-                        pass
-
-                # Ejecutamos las operaciones matemáticas aritméticas reales en la CPU
-                lineas_calculadas = []
-                for clave, sexos in grupos.items():
-                    if "hombre" in sexos and "mujer" in sexos:
-                        val_h = sexos["hombre"]
-                        val_m = sexos["mujer"]
-                        
-                        if val_h > 0:
-                            dif_absoluta = round(val_h - val_m, 2)
-                            brecha_porcentual = round(((val_h - val_m) / val_h) * 100, 1)
-                            
-                            # Si hay agrupaciones por más variables (ej: múltiples años), lo indicamos contextualmente
-                            info_grupo = f"Para el grupo {list(clave)}: " if clave and any(clave) else ""
-                            lineas_calculadas.append(
-                                f"- {info_grupo}Diferencia absoluta exacta: {dif_absoluta}. "
-                                f"Brecha porcentual exacta: {brecha_porcentual}%."
-                            )
-                
-                if lineas_calculadas:
-                    bloque_calculos_python = "\n".join(lineas_calculadas)
+        bloque_calculos_python = _calcular_brechas(sql, cabeceras,
+                                                   cabeceras_min, filas)
     except Exception:
-        # Mecanismo de seguridad pasiva: si hay un error imprevisto analizando los datos,
-        # la aplicación no se bloquea y deja que el flujo original continúe.
-        pass
+        # Seguridad pasiva: si algo falla analizando los datos, la app no se
+        # bloquea; simplemente no se adjuntan brechas precalculadas.
+        bloque_calculos_python = ""
 
-    # Adjuntamos las métricas exactas calculadas por Python para que el LLM solo las transcriba
     instruccion_calculos = ""
     if bloque_calculos_python:
         instruccion_calculos = (
-            f"\nDATOS MATEMÁTICOS CALCULADOS POR EL SISTEMA (USA ESTOS, NO CALCULES TÚ NADA):\n"
-            f"{bloque_calculos_python}\n"
-        )
-    # =========================================================================
+            "\nFRASES DE BRECHA YA REDACTADAS POR EL SISTEMA (transcribelas tal "
+            "cual, no recalcules ni reformules ni cambies el sentido):\n"
+            f"{bloque_calculos_python}\n")
 
     respuesta = cliente.chat.completions.create(
         model=config.AI_MODEL,
         messages=[
             {"role": "system", "content": (
                 "Redactas respuestas claras y breves en español a partir de "
-                "resultados de consultas SQL. No inventes datos. Presenta "
-                "todos los datos del resultado, no solo una parte.\n\n"
-                "PERSPECTIVA DE GÉNERO (obligatorio siempre que el resultado "
-                "incluya datos de Hombre y de Mujer):\n"
+                "resultados de consultas SQL. No inventes datos. Presenta todos "
+                "los datos del resultado, no solo una parte.\n\n"
+                "PERSPECTIVA DE GÉNERO (cuando el resultado incluya datos de "
+                "Hombre y de Mujer):\n"
                 "1. Presenta la respuesta SEPARADA en dos bloques claramente "
-                "diferenciados: primero los datos de Hombres y despues los "
-                "datos de Mujeres. No los mezcles en una sola lista.\n"
-                "2. Despues de los dos bloques, añade SIEMPRE un apartado con "
-                "la brecha de genero.\n"
-                "REGLA DE ORO MÁXIMA: Usa exclusivamente los datos numéricos de brechas "
-                "y diferencias absolutas proporcionados en la sección 'DATOS MATEMÁTICOS CALCULADOS POR EL SISTEMA'. "
-                "No intentes restar ni dividir tú los valores de las filas por tu cuenta, limítate a copiar las cifras del sistema.\n"
-                "Debes enunciar la brecha porcentual EXACTAMENTE con esta estructura: "
-                "«la brecha es del X %; las mujeres [verbo adecuado al contexto, ej. perciben/tienen/registran] un X % menos que los hombres». "
-                "REGLA ESTRICTA: Bajo ninguna circunstancia utilices la base femenina para el calculo ni uses "
-                "la formula o estructura 'los hombres ganan/tienen un Y % mas'. "
-                "Ademas, adapta los detalles adicionales segun el tipo de dato: para importes (salarios, rentas) "
-                "añade tambien la diferencia absoluta exacta que te proporciona el sistema; para tasas y porcentajes expresa la diferencia en puntos porcentuales; "
-                "para recuentos usa la diferencia absoluta.\n"
-                "3. Si hay varios años o categorias, aplica este desglose y "
-                "esta diferencia para cada uno de ellos.\n\n"
-                "AVISO DEL AÑO: si la consulta SQL filtra por un unico año "
-                "mediante MAX(Año) (es decir, se ha devuelto el ultimo año "
-                "disponible por defecto), indica al final esta frase: 'Los "
-                "datos son del año mas reciente disponible (AAAA).', "
-                "sustituyendo AAAA por el año concreto de los datos del "
-                "resultado. Añade ademas que se puede pedir la evolucion "
-                "completa de todos los años."
+                "diferenciados: primero los datos de Hombres y despues los de "
+                "Mujeres. No los mezcles en una sola lista.\n"
+                "2. A continuacion, SOLO si el sistema te ha proporcionado una o "
+                "varias 'FRASES DE BRECHA YA REDACTADAS', añade un apartado de "
+                "brecha de genero TRANSCRIBIENDO esas frases tal cual, una por "
+                "grupo. Si el sistema NO te proporciona ninguna frase de brecha, "
+                "NO calcules ni inventes ninguna brecha: limitate a presentar "
+                "los datos de cada bloque.\n"
+                "3. No restes ni dividas tu por tu cuenta los valores de las "
+                "filas: usa exclusivamente las frases que te da el sistema.\n"
+                "4. Si hay varios años o categorias, presenta el desglose y la "
+                "brecha correspondiente de cada uno."
             )},
             {"role": "user", "content": (
                 f"Pregunta del usuario: {pregunta}\n\n"
                 f"Consulta ejecutada: {sql}\n\n"
-                f"Resultado ({len(filas)} filas):\n{tabla_texto}{aviso}\n\n"
-                f"{instruccion_calculos}\n"
+                f"Resultado ({len(filas)} filas):\n{tabla_texto}{aviso}\n"
+                f"{instruccion_calculos}"
+                f"{instruccion_anio}\n"
                 "Redacta la respuesta para el usuario."
             )},
         ],
