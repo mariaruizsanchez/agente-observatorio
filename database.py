@@ -124,19 +124,34 @@ def obtener_territorios():
     Se consulta directamente la base de datos, asi que refleja siempre los
     datos reales. Esta es la fuente de verdad UNICA de los territorios (ver la
     nota en obtener_diccionario).
+
+    FIX (bug salario + territorio): ademas de las tablas CON territorio, se
+    calculan las tablas SIN columna Territorio (indicadores agregados de
+    Euskadi, como los salarios) y se listan explicitamente en el texto. Asi el
+    modelo sabe que para esas tablas NO debe pedir territorio ni filtrar por el,
+    lo que evitaba que "salario de mujeres vs hombres" pidiera territorio y
+    luego devolviera vacio al filtrar por Bizkaia.
     """
     consulta_tablas = """
         SELECT TABLE_NAME FROM INFORMATION_SCHEMA.COLUMNS
         WHERE COLUMN_NAME = 'Territorio'
     """
+    consulta_todas = """
+        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+    """
     lineas = []
     mapa = {}
     with conectar() as conn:
         cursor = conn.cursor()
-        cursor.execute(consulta_tablas)
-        tablas = [fila[0] for fila in cursor.fetchall()]
 
-        for tabla in sorted(tablas):
+        cursor.execute(consulta_tablas)
+        tablas_con_territorio = sorted({fila[0] for fila in cursor.fetchall()})
+
+        cursor.execute(consulta_todas)
+        todas_las_tablas = {fila[0] for fila in cursor.fetchall()}
+
+        for tabla in tablas_con_territorio:
             cursor.execute(
                 f"SELECT DISTINCT Territorio FROM [{tabla}] "
                 f"WHERE Territorio IS NOT NULL"
@@ -145,6 +160,21 @@ def obtener_territorios():
             territorios = sorted(v[0] for v in valores)
             mapa[tabla] = territorios
             lineas.append(f"{tabla}: {', '.join(territorios)}")
+
+    # Tablas sin dimension territorial: todas las que existen menos las que
+    # tienen columna Territorio (descartando las de sistema de SQL Server).
+    sin_territorio = sorted(
+        t for t in (todas_las_tablas - set(mapa.keys()))
+        if not t.startswith("sys")
+    )
+    if sin_territorio:
+        lineas.append("")
+        lineas.append(
+            "Tablas SIN dimension territorial (no tienen columna Territorio; "
+            "son agregados que NO se desglosan por territorio: para ellas nunca "
+            "pidas territorio ni añadas WHERE Territorio): "
+            + ", ".join(sin_territorio)
+        )
 
     return "\n".join(lineas), mapa
 

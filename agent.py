@@ -48,6 +48,34 @@ _PISTAS_IMPORTE = ("salario", "renta", "importe", "ingreso", "euro", "€", "gan
 _PALABRAS_EVOLUCION = ("evolu", "por año", "historic", "histórico", "tendencia",
                        "cada año", "anual", "desde", "hasta", "serie")
 
+# FIX (bug nuevo, comparacion territorial): marcadores de que el usuario quiere
+# COMPARAR territorios o saber en cual es mayor/menor un indicador. Cuando
+# aparecen, NO se pide aclaracion de territorio: se agrupa por Territorio y se
+# devuelven todos.
+_PALABRAS_COMPARA_TERRITORIO = (
+    "en qué territorio", "en que territorio", "qué territorio", "que territorio",
+    "cuál territorio", "cual territorio", "qué provincia", "que provincia",
+    "cuál provincia", "cual provincia", "entre territorios", "entre provincias",
+    "compara", "comparar", "comparativa", "ranking", "por territorio",
+    "por provincia", "cada territorio", "cada provincia",
+)
+
+
+def _texto_conversacion(historial, pregunta):
+    """
+    FIX (bug 1, comparacion): une el texto de TODOS los turnos de usuario del
+    hilo + la pregunta actual, en minusculas. Asi la deteccion de intencion
+    (evolucion, comparacion, año explicito) sigue funcionando aunque la señal
+    este en un turno anterior. Caso tipico: "Evolucion de la tasa de paro por
+    año en Bizkaia" -> el agente pide "Hombre/Mujer/ambos" -> el usuario
+    responde "Mujer". La palabra "evolucion" esta en el primer turno, no en
+    "Mujer"; sin esto, la red de "año por defecto" colapsaba la serie a un año.
+    """
+    partes = [m.get("content", "") for m in (historial or [])
+              if m.get("role") == "user"]
+    partes.append(pregunta or "")
+    return " ".join(partes).lower()
+
 
 def _prompt_sistema(esquema, diccionario, territorios):
     """Construye las instrucciones del sistema, con el esquema y el diccionario."""
@@ -86,6 +114,11 @@ REGLA DEL TERRITORIO (obligatoria, compruebala SIEMPRE antes de responder):
 Mira la lista "Territorios disponibles en cada tabla" de arriba y localiza la
 tabla que vas a consultar. Cada fila de datos pertenece a un territorio
 concreto y los territorios NO se pueden mezclar en una misma consulta.
+- Si la tabla NO aparece en esa lista (o figura como "tabla SIN dimension
+  territorial"): el indicador es un agregado que no se desglosa por territorio.
+  En ese caso NO pidas territorio, NO añadas WHERE Territorio y NO ofrezcas
+  ninguna aclaracion territorial. Responde con el dato agregado tal cual. Esto
+  aplica, por ejemplo, a los salarios, que son un agregado de Euskadi.
 - Si esa tabla tiene UN SOLO territorio en la lista: usa ese directamente con
   WHERE Territorio = '...'. NO preguntes nada al usuario, solo hay una opcion.
 - Si esa tabla tiene VARIOS territorios y la conversacion YA indica cual
@@ -95,6 +128,27 @@ concreto y los territorios NO se pueden mezclar en una misma consulta.
   ofreciendo EXACTAMENTE los territorios que esa tabla tiene en la lista.
 Nunca ofrezcas un territorio que no aparezca en la lista para esa tabla.
 
+REGLA DE COMPARACION ENTRE TERRITORIOS (tiene prioridad sobre la aclaracion):
+Si la pregunta compara territorios o pregunta en cual es mayor/menor un
+indicador (por ejemplo "en que territorio es mayor...", "compara X entre
+Araba, Bizkaia y Gipuzkoa", "ranking por territorio"):
+- NO pidas aclaracion de territorio y NO filtres por un unico territorio.
+- Incluye Territorio en el SELECT y en el GROUP BY y devuelve TODOS los
+  territorios de esa tabla, ordenados por el valor del indicador.
+- Si esa tabla solo tiene un territorio (o no tiene dimension territorial),
+  NO inventes una comparacion: responde que ese indicador no se desglosa por
+  territorio.
+
+REGLA DE SECTOR ECONOMICO:
+Si la pregunta menciona un sector o rama de actividad concreto (industria,
+construccion, servicios, agricultura, etc.), localiza la tabla y la COLUMNA de
+sector/rama y filtra por ese sector (WHERE <columna_sector> = '...'). Usa
+SIEMPRE la misma tabla de ocupacion por sector con independencia de como se
+formule la pregunta: "personas ocupadas en la industria", "mujeres en el
+sector industria" o "ocupacion industrial" deben dar el MISMO dato. Nunca
+devuelvas el total de ocupacion de todos los sectores cuando se pide un sector
+concreto.
+
 REGLA DEL SEXO (perspectiva de genero del Observatorio):
 Muchas tablas tienen la columna Sexo (valores: Hombre, Mujer). Siempre que la
 tabla consultada tenga columna Sexo, INCLUYE esa columna en el SELECT y en el
@@ -102,6 +156,10 @@ GROUP BY / ORDER BY, para que los resultados queden desglosados por sexo.
 No mezcles ni promedies hombres y mujeres en un mismo valor. Este desglose es
 el objetivo central del Observatorio, asi que aplicalo aunque la pregunta no
 mencione el sexo explicitamente.
+No calcules tu mismo en la SQL porcentajes ni ratios entre sexos (no crees
+columnas del tipo "Porcentaje_Mujeres"): el sistema calcula las proporciones y
+las brechas a partir de los recuentos. Limitate a devolver los valores por
+sexo.
 
 REGLA DEL AÑO (comportamiento por defecto, similar a un filtro de año):
 Casi todas las tablas tienen la columna Año.
@@ -109,7 +167,8 @@ Casi todas las tablas tienen la columna Año.
   ese año.
 - Si la pregunta pide explicita o implicitamente varios años (con palabras
   como "evolucion", "por año", "historico", "tendencia", "cada año", "desde
-  ... hasta ..."), devuelve todos los años, ordenados por año.
+  ... hasta ..."), devuelve todos los años, ordenados por año, SIN filtrar por
+  un unico año.
 - Si la pregunta NO menciona ningun año ni indica varios años, devuelve
   UNICAMENTE el dato del ultimo año disponible. Para ello filtra con
   WHERE Año = (SELECT MAX(Año) FROM <la misma tabla>), e INCLUYE SIEMPRE la
@@ -214,10 +273,19 @@ def _frase_brecha(val_h, val_m, tipo):
                 f"{sentido} que los hombres (diferencia absoluta de {dif} €).")
 
     # recuento
+    # FIX (bug 4): ademas de la diferencia absoluta, añadimos la PROPORCION de
+    # mujeres sobre el total (mujeres / (hombres + mujeres)). Es la cifra
+    # correcta para preguntas del tipo "que porcentaje de electas son mujeres"
+    # (~59 %), que el modelo calculaba mal como 0 %/100 % por sexo.
+    total = abs(val_h) + abs(val_m)
     dif = round(abs(val_h - val_m))
     sentido = "menos" if val_m <= val_h else "mas"
-    return (f"la diferencia es de {dif}; las mujeres registran {dif} {sentido} "
-            f"que los hombres.")
+    linea = (f"la diferencia es de {dif}; las mujeres registran {dif} {sentido} "
+             f"que los hombres")
+    if total > 0:
+        pct_m = round(abs(val_m) / total * 100, 1)
+        linea += f" (las mujeres representan el {pct_m} % del total)"
+    return linea + "."
 
 
 def _calcular_brechas(sql, cabeceras, cabeceras_min, filas):
@@ -235,11 +303,21 @@ def _calcular_brechas(sql, cabeceras, cabeceras_min, filas):
 
     idx_sexo = cabeceras_min.index("sexo")
 
+    # FIX (bug 4): columnas de porcentaje/ratio precalculadas que el modelo
+    # pudiera haber colado (p. ej. "Porcentaje_Mujeres" con 0/100 por sexo). Se
+    # ignoran POR COMPLETO: ni se toman como valor del indicador ni entran en la
+    # clave de agrupacion. Si entraran en la clave, cada sexo caeria en un grupo
+    # distinto (0,0 vs 100,0) y la brecha no se calcularia.
+    def _es_porcentaje(col):
+        return "porcentaje" in col or col.startswith("pct") or "pct_" in col
+
+    idx_ignorar = {i for i, col in enumerate(cabeceras_min) if _es_porcentaje(col)}
+
     # Elegimos como columna de valor la PRIMERA realmente numerica (evita
     # confundir una columna de texto como "Indicador" con el valor).
     idx_valor = None
     for i, col in enumerate(cabeceras_min):
-        if col in ("año", "sexo", "territorio", "id"):
+        if col in ("año", "sexo", "territorio", "id") or i in idx_ignorar:
             continue
         try:
             float(next(f[i] for f in filas if f[i] is not None))
@@ -252,12 +330,13 @@ def _calcular_brechas(sql, cabeceras, cabeceras_min, filas):
 
     nombre_valor = cabeceras[idx_valor]
 
-    # Agrupamos por las dimensiones (todo lo que no sea Sexo ni el valor) para
-    # calcular la brecha de cada grupo por separado (cada año, cada territorio).
+    # Agrupamos por las dimensiones (todo lo que no sea Sexo, el valor ni una
+    # columna de porcentaje cruda) para calcular la brecha de cada grupo por
+    # separado (cada año, cada territorio).
     grupos = {}
     for fila in filas:
         clave = tuple(str(fila[i]) for i in range(len(cabeceras_min))
-                      if i not in (idx_sexo, idx_valor))
+                      if i not in (idx_sexo, idx_valor) and i not in idx_ignorar)
         sexo_valor = str(fila[idx_sexo]).strip().lower()
         try:
             grupos.setdefault(clave, {})[sexo_valor] = float(fila[idx_valor])
@@ -275,8 +354,16 @@ def _calcular_brechas(sql, cabeceras, cabeceras_min, filas):
     return "\n".join(lineas)
 
 
-def _redactar_respuesta(pregunta, sql, cabeceras, filas):
-    """Segunda llamada al modelo: redacta la respuesta en lenguaje natural."""
+def _redactar_respuesta(pregunta, sql, cabeceras, filas,
+                        pide_anio=False, pide_evolucion=False):
+    """
+    Segunda llamada al modelo: redacta la respuesta en lenguaje natural.
+
+    'pide_anio' y 'pide_evolucion' se calculan en responder() sobre TODO el
+    hilo de conversacion (no solo sobre 'pregunta'), para que la red de
+    seguridad del año respete la intencion aunque venga de un turno anterior
+    (p. ej. una peticion de evolucion seguida de una aclaracion "Mujer").
+    """
     cabeceras_min = [c.lower() for c in cabeceras]
 
     # -- FIX (bug 1 y 6): red de seguridad del "año por defecto" --------------
@@ -284,10 +371,8 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
     # trae varios años, nos quedamos SOLO con el ultimo. Asi la brecha y el
     # desglose se calculan sobre el ultimo año aunque la SQL hubiera devuelto la
     # serie completa o un promedio multianual (corrige el caso "brecha salarial"
-    # que daba 18,9 % en vez de 12,81 %).
-    pregunta_l = pregunta.lower()
-    pide_anio = bool(re.search(r"\b(19|20)\d{2}\b", pregunta_l))
-    pide_evolucion = any(p in pregunta_l for p in _PALABRAS_EVOLUCION)
+    # que daba 18,9 % en vez de 12,81 %). Cuando SI se pide evolucion, NO se
+    # colapsa: se devuelve la serie completa.
     if "año" in cabeceras_min and not pide_anio and not pide_evolucion:
         ia = cabeceras_min.index("año")
         try:
@@ -311,11 +396,12 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
 
     # -- FIX (bug 4 y 8): nota de año calculada en Python ---------------------
     # En vez de pedir al modelo que sustituya "(AAAA)", calculamos aqui los años
-    # distintos del resultado: si hay uno, le damos el texto exacto con el año;
-    # si hay varios, le decimos que NO ponga la coletilla (que se colaba en las
-    # consultas de evolucion).
+    # distintos del resultado. La coletilla "datos del año mas reciente" SOLO
+    # tiene sentido cuando el usuario NO pidio un año y el resultado tiene un
+    # unico año (comportamiento por defecto). Si el usuario pidio un año
+    # explicito, o si hay varios años (evolucion), no se añade.
     instruccion_anio = ""
-    if "año" in cabeceras_min:
+    if "año" in cabeceras_min and not pide_anio:
         ia = cabeceras_min.index("año")
         anios = sorted({str(f[ia]) for f in filas if f[ia] is not None})
         if len(anios) == 1:
@@ -325,7 +411,7 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                 f"exactamente esta frase: Los datos son del año mas reciente "
                 f"disponible ({anios[0]}). Se puede pedir la evolucion completa "
                 "de todos los años.\n")
-        else:
+        elif len(anios) > 1:
             instruccion_anio = (
                 "\nINSTRUCCION INTERNA (no la copies en la respuesta): el "
                 "resultado incluye varios años, asi que NO añadas ninguna "
@@ -369,7 +455,9 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
                 "NO calcules ni inventes ninguna brecha: limitate a presentar "
                 "los datos de cada bloque.\n"
                 "3. No restes ni dividas tu por tu cuenta los valores de las "
-                "filas: usa exclusivamente las frases que te da el sistema.\n"
+                "filas: usa exclusivamente las frases que te da el sistema. "
+                "Ignora cualquier columna de porcentaje por sexo que venga en "
+                "las filas crudas (como 'Porcentaje_Mujeres'): no la muestres.\n"
                 "4. Si hay varios años o categorias, presenta el desglose y la "
                 "brecha correspondiente de cada uno."
             )},
@@ -394,7 +482,8 @@ def responder(pregunta, esquema, diccionario="", territorios="",
 
     'historial' es la lista de turnos previos de la conversacion, en formato
     [{"role": "user"/"assistant", "content": ...}, ...]. Permite que el agente
-    recuerde mensajes anteriores (por ejemplo, una aclaracion de territorio).
+    recuerde mensajes anteriores (por ejemplo, una aclaracion de territorio o
+    el indicador de la pregunta anterior para seguimientos tipo "¿y en 2019?").
 
     'mapa_territorios' es {tabla: [territorios]}. Sirve para resolver solo,
     sin molestar al usuario, las aclaraciones de tablas que tienen un unico
@@ -409,11 +498,44 @@ def responder(pregunta, esquema, diccionario="", territorios="",
     historial = list(historial or [])
     mapa_territorios = mapa_territorios or {}
 
+    # -- FIX (bug 1, comparacion): intencion calculada sobre TODO el hilo ------
+    # Se mira el texto de todos los turnos de usuario + la pregunta actual, no
+    # solo la pregunta, para que "evolucion" o "comparar territorios" sigan
+    # detectandose aunque la pregunta actual sea una aclaracion corta ("Mujer").
+    texto_hilo = _texto_conversacion(historial, pregunta)
+    pide_evolucion = any(p in texto_hilo for p in _PALABRAS_EVOLUCION)
+    pide_anio = bool(re.search(r"\b(19|20)\d{2}\b", texto_hilo))
+    compara_territorio = any(p in texto_hilo
+                             for p in _PALABRAS_COMPARA_TERRITORIO)
+
     # Construimos los mensajes: sistema + turnos previos + pregunta actual.
     mensajes = [{"role": "system",
                  "content": _prompt_sistema(esquema, diccionario, territorios)}]
     mensajes += historial
     mensajes.append({"role": "user", "content": pregunta})
+
+    # -- FIX (bug 1 y comparacion): directivas deterministas para esta pregunta
+    # Reforzamos en la generacion de SQL lo que ya detectamos por reglas, para
+    # que el modelo no colapse la serie ni pida territorio cuando hay que
+    # comparar. Esto NO depende de que el modelo "acierte" a interpretar la
+    # intencion: se la imponemos.
+    directivas = []
+    if pide_evolucion:
+        directivas.append(
+            "La pregunta pide la EVOLUCION temporal: NO filtres por un unico "
+            "año ni uses WHERE Año = (SELECT MAX(Año)...). Devuelve TODOS los "
+            "años disponibles, con la columna Año en el SELECT y ORDER BY Año.")
+    if compara_territorio:
+        directivas.append(
+            "La pregunta COMPARA territorios: NO pidas aclaracion de territorio "
+            "y NO filtres por un unico territorio. Incluye Territorio en SELECT "
+            "y GROUP BY y devuelve todos los territorios de la tabla. Si la "
+            "tabla solo tiene un territorio o no tiene dimension territorial, "
+            "responde que ese indicador no se desglosa por territorio.")
+    if directivas:
+        mensajes.append({"role": "system",
+                         "content": "INSTRUCCIONES PARA ESTA PREGUNTA:\n- "
+                                    + "\n- ".join(directivas)})
 
     sql = _pedir_sql(mensajes)
 
@@ -452,12 +574,27 @@ def responder(pregunta, esquema, diccionario="", territorios="",
         return {"sql": sql, "respuesta": f"No se pudo ejecutar la consulta: {e}",
                 "cabeceras": None, "filas": None, "historial": historial}
 
-    texto = _redactar_respuesta(pregunta, sql, cabeceras, filas)
-    # Tras una respuesta completa, reiniciamos el historial: la siguiente
-    # pregunta empieza de cero (evita arrastrar contexto indefinidamente).
+    texto = _redactar_respuesta(pregunta, sql, cabeceras, filas,
+                                pide_anio=pide_anio,
+                                pide_evolucion=pide_evolucion)
+
+    # -- FIX (bug 6): historial conversacional ACOTADO ------------------------
+    # Antes se reiniciaba el historial a [] tras cada respuesta, lo que rompia
+    # los seguimientos multiturno ("¿y en 2019?", "¿y en Araba?"): el agente
+    # perdia el indicador anterior. Ahora conservamos un historial corto: el
+    # ultimo turno + una nota con la SQL ejecutada (que le da al modelo la
+    # tabla y los filtros usados). Se limita a los ultimos intercambios para no
+    # arrastrar contexto indefinidamente ni inflar los tokens.
+    historial_actualizado = historial + [
+        {"role": "user", "content": pregunta},
+        {"role": "assistant", "content": f"(consulta ejecutada: {sql})"},
+    ]
+    MAX_MENSAJES = 4  # 2 intercambios (pregunta + nota) x 2
+    historial_actualizado = historial_actualizado[-MAX_MENSAJES:]
+
     # Las filas se convierten a listas normales para que sean fáciles de usar
     # desde la interfaz web.
     return {"sql": sql, "respuesta": texto,
             "cabeceras": cabeceras,
             "filas": [list(f) for f in filas],
-            "historial": []}
+            "historial": historial_actualizado}
