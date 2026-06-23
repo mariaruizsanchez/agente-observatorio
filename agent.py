@@ -37,7 +37,7 @@ cliente = OpenAI(base_url=config.AI_BASE_URL, api_key=config.AI_API_KEY)
 # esas tablas no se calcula brecha. La comparacion es por SUBCADENA, asi que
 # "Demografia_Nacimientos" coincide tanto si la tabla en SQL se llama
 # Demografia_Nacimientos como tbl_Demografia_Nacimientos.
-TABLAS_SIN_BRECHA = ("Demografia_Nacimientos",)
+TABLAS_SIN_BRECHA = ("Demografia_Nacimientos", "Demografia_Jovenes")
 
 # FIX (bug 2): pistas para clasificar el tipo de indicador por el nombre de la
 # columna de valor, y decidir como se expresa la brecha (pp / % / recuento).
@@ -320,13 +320,16 @@ def _redactar_respuesta(pregunta, sql, cabeceras, filas):
         anios = sorted({str(f[ia]) for f in filas if f[ia] is not None})
         if len(anios) == 1:
             instruccion_anio = (
-                f"\nNOTA DE AÑO (incluyela tal cual al final, sin cambiar nada): "
-                f"'Los datos son del año mas reciente disponible ({anios[0]}). "
-                f"Se puede pedir la evolucion completa de todos los años.'\n")
+                "\nAl final de la respuesta, en un parrafo aparte y SIN ninguna "
+                "etiqueta (no escribas 'Nota de año') ni comillas, escribe "
+                f"exactamente esta frase: Los datos son del año mas reciente "
+                f"disponible ({anios[0]}). Se puede pedir la evolucion completa "
+                "de todos los años.\n")
         else:
             instruccion_anio = (
-                "\nNOTA DE AÑO: el resultado incluye varios años; NO añadas "
-                "ninguna coletilla sobre 'año mas reciente disponible'.\n")
+                "\nINSTRUCCION INTERNA (no la copies en la respuesta): el "
+                "resultado incluye varios años, asi que NO añadas ninguna "
+                "coletilla sobre el 'año mas reciente disponible'.\n")
 
     # -- FIX (bug 2, 4, 5, 10): brecha calculada y redactada en Python --------
     # La brecha (con su unidad y su signo) se calcula aqui de forma exacta y se
