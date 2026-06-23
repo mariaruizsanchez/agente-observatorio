@@ -1,3 +1,4 @@
+
 """
 Acceso a la base de datos Azure SQL.
 

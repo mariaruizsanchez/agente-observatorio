@@ -28,7 +28,7 @@ import database
 # Marcador de version. Sirve para confirmar, de un vistazo en la interfaz, que
 # Streamlit esta sirviendo esta version y no una cacheada/antigua. Para mostrarlo
 # en la app: st.caption(f"Agente v{agent.VERSION}") o similar.
-VERSION = "2026-06-23m-herencia-eliptica"
+VERSION = "2026-06-23n-rechazo-destructivo"
 
 
 # Cliente de IA: la URL base y la clave vienen de la configuracion.
@@ -108,6 +108,26 @@ def _es_peticion_amplia(pregunta):
     q = "".join(c for c in unicodedata.normalize("NFKD", (pregunta or "").lower())
                 if not unicodedata.combining(c))
     return any(p in q for p in _PETICIONES_AMPLIAS)
+
+
+# Verbos de intencion destructiva / de escritura. Se comparan como palabra
+# completa (\b) para no saltar con derivados de lectura ("datos actualizados",
+# "registros eliminados", "borrador"). El guard de solo lectura ya bloquea la
+# ESCRITURA a nivel de SQL; esto ademas rechaza la INTENCION antes de generar
+# nada, para que "borra la tabla" no conteste nunca con datos.
+_VERBOS_ESCRITURA = (
+    "borra", "borrar", "elimina", "eliminar", "drop", "truncate", "trunca",
+    "delete", "inserta", "insertar", "modifica", "modificar", "actualiza",
+    "actualizar", "update", "altera", "alterar", "vacia", "vaciar", "reemplaza",
+    "reemplazar", "sobrescribe", "sobrescribir",
+)
+
+
+def _es_peticion_destructiva(pregunta):
+    """True si la pregunta pide borrar/modificar/insertar datos (palabra completa)."""
+    q = "".join(c for c in unicodedata.normalize("NFKD", (pregunta or "").lower())
+                if not unicodedata.combining(c))
+    return bool(re.search(r"\b(" + "|".join(_VERBOS_ESCRITURA) + r")\b", q))
 
 
 def _listar_dimensiones(esquema):
@@ -1059,6 +1079,23 @@ def responder(pregunta, esquema, diccionario="", territorios="",
     """
     historial = list(historial or [])
     mapa_territorios = mapa_territorios or {}
+
+    # -- FIX (Q20): intencion destructiva ("borra la tabla", "actualiza ...") --
+    # Rechazo determinista ANTES de generar SQL, para que una peticion de
+    # borrado/modificacion no conteste nunca con datos. El guard de solo lectura
+    # sigue siendo la segunda barrera a nivel de SQL.
+    if _es_peticion_destructiva(pregunta):
+        respuesta = (
+            "Solo puedo realizar consultas de lectura; no puedo borrar, "
+            "modificar, insertar ni actualizar datos de la base de datos. "
+            "Puedo ayudarte a consultar los indicadores disponibles.")
+        nuevo_historial = (historial + [
+            {"role": "user", "content": pregunta},
+            {"role": "assistant", "content": respuesta},
+        ])[-4:]
+        return {"sql": None, "respuesta": respuesta,
+                "cabeceras": None, "filas": None,
+                "historial": nuevo_historial}
 
     # -- FIX (Q22): peticion demasiado amplia ("dame todos los datos") --------
     # No se mapea a una sola consulta util; respondemos con las dimensiones
