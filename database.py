@@ -190,7 +190,11 @@ def ejecutar_consulta(sql):
     prohibidas = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
                   "CREATE", "TRUNCATE", "MERGE", "EXEC")
     primera_palabra = sql_limpio.upper().split(None, 1)[0] if sql_limpio else ""
-    if primera_palabra != "SELECT":
+    # Se permiten consultas de lectura que empiezan por SELECT o por WITH (CTE
+    # de lectura). El bloqueo real de escritura lo hace el escaneo de tokens de
+    # abajo (INSERT/UPDATE/DELETE/...), que tambien cubre el caso
+    # "WITH ... INSERT ...".
+    if primera_palabra not in ("SELECT", "WITH"):
         raise ValueError("Solo se permiten consultas SELECT de lectura.")
     if any(p in sql_limpio.upper().split() for p in prohibidas):
         raise ValueError("La consulta contiene instrucciones no permitidas.")
